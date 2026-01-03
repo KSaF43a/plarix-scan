@@ -6,6 +6,8 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -126,6 +128,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	targetURL, _ := url.Parse(targetBase)
 
+	// Optionally inject stream_options for OpenAI (opt-in only)
+	if s.config.StreamUsageInjection && provider == "openai" {
+		s.injectStreamOptions(r)
+	}
+
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = targetURL.Scheme
@@ -144,6 +151,47 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// injectStreamOptions modifies OpenAI requests to include stream_options for usage reporting.
+// Only called when StreamUsageInjection is true.
+func (s *Server) injectStreamOptions(r *http.Request) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return
+	}
+	r.Body.Close()
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		// Not JSON, restore body and continue
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		return
+	}
+
+	// Only inject if stream=true and stream_options not already set
+	if stream, ok := payload["stream"].(bool); ok && stream {
+		if _, exists := payload["stream_options"]; !exists {
+			payload["stream_options"] = map[string]interface{}{
+				"include_usage": true,
+			}
+		}
+	}
+
+	modified, err := json.Marshal(payload)
+	if err != nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		return
+	}
+
+	r.Body = io.NopCloser(bytes.NewReader(modified))
+	r.ContentLength = int64(len(modified))
+}
+
 // handleResponse processes the API response to extract usage data.
 func (s *Server) handleResponse(provider, endpoint string, resp *http.Response) error {
 	// Only process successful responses
@@ -151,8 +199,28 @@ func (s *Server) handleResponse(provider, endpoint string, resp *http.Response) 
 		return nil
 	}
 
-	// Check content type - only process JSON
 	contentType := resp.Header.Get("Content-Type")
+
+	// Detect streaming responses (SSE)
+	isStreaming := strings.Contains(contentType, "text/event-stream")
+
+	if isStreaming {
+		// For streaming: DON'T buffer the response, just pass through
+		// Record as an entry with unknown cost
+		entry := ledger.Entry{
+			Provider:      provider,
+			Endpoint:      endpoint,
+			Streaming:     true,
+			CostKnown:     false,
+			UnknownReason: "streaming response - usage not captured",
+		}
+		if s.config.OnEntry != nil {
+			s.config.OnEntry(entry)
+		}
+		return nil
+	}
+
+	// Non-streaming: only process JSON
 	if !strings.Contains(contentType, "application/json") {
 		return nil
 	}

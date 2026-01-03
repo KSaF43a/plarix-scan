@@ -2,6 +2,14 @@
 
 All notable changes to Plarix Scan will be documented in this file.
 
+## [0.5.0] - 2026-01-03
+
+### Added
+- Transparent streaming (SSE) support: passes through chunks without buffering
+- Automatic detection of streaming responses (marked as unknown cost by default)
+- Optional `enable_openai_stream_usage_injection` input to force usage reporting in OpenAI streams
+- Request body modification proxy logic for injection
+
 ## [0.4.0] - 2026-01-03
 
 ### Added

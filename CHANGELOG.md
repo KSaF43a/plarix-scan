@@ -2,6 +2,15 @@
 
 All notable changes to Plarix Scan will be documented in this file.
 
+## [0.3.0] - 2026-01-03
+
+### Added
+- `internal/proxy` package: HTTP forward proxy with provider routing
+- `internal/providers/openai` package: response parser for usage extraction
+- Full CLI integration: proxy starts, runs user command, computes costs, writes ledger + summary
+- Environment variable injection for SDK base URLs (OPENAI_BASE_URL, etc.)
+- Integration test with mock OpenAI server
+
 ## [0.2.0] - 2026-01-03
 
 ### Added

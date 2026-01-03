@@ -9,11 +9,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
+
+	"plarix-action/internal/ledger"
+	"plarix-action/internal/pricing"
+	"plarix-action/internal/proxy"
 )
 
-// Version is set from VERSION file at build time or read at runtime.
-const version = "0.1.0"
+const version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -23,7 +29,10 @@ func main() {
 
 	switch os.Args[1] {
 	case "run":
-		runCmd(os.Args[2:])
+		if err := runCmd(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "version", "--version", "-v":
 		fmt.Printf("plarix-scan v%s\n", version)
 	case "help", "--help", "-h":
@@ -35,7 +44,6 @@ func main() {
 	}
 }
 
-// printUsage prints CLI usage information.
 func printUsage() {
 	fmt.Println(`Usage: plarix-scan <command> [options]
 
@@ -53,50 +61,216 @@ Run Options:
   --enable-openai-stream-usage-injection <bool>   Opt-in for OpenAI stream usage (default: false)`)
 }
 
-// runCmd handles the "run" subcommand.
-func runCmd(args []string) {
+func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 
 	command := fs.String("command", "", "Command to execute (required)")
-	_ = fs.String("pricing", "", "Path to custom pricing JSON")
-	_ = fs.Float64("fail-on-cost", 0, "Exit non-zero if cost exceeds threshold (USD)")
-	_ = fs.String("providers", "openai,anthropic,openrouter", "Providers to intercept")
-	_ = fs.String("comment", "both", "Comment mode: pr, summary, both")
+	pricingPath := fs.String("pricing", "", "Path to custom pricing JSON")
+	failOnCost := fs.Float64("fail-on-cost", 0, "Exit non-zero if cost exceeds threshold (USD)")
+	providers := fs.String("providers", "openai,anthropic,openrouter", "Providers to intercept")
+	commentMode := fs.String("comment", "both", "Comment mode: pr, summary, both")
 	_ = fs.Bool("enable-openai-stream-usage-injection", false, "Opt-in for OpenAI stream usage")
 
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
+	// Get command from flag or env
 	if *command == "" {
-		// Try environment variable (set by action.yml)
 		if envCmd := os.Getenv("INPUT_COMMAND"); envCmd != "" {
 			*command = envCmd
 		} else {
-			fmt.Fprintln(os.Stderr, "Error: --command is required")
-			os.Exit(1)
+			return fmt.Errorf("--command is required")
 		}
 	}
 
-	// For v0.1.0: Just write Step Summary and exit
-	// Future milestones will add proxy, command execution, and cost tracking
-	summary := fmt.Sprintf("## ✅ Plarix Scan Installed (v%s)\n\n", version)
-	summary += fmt.Sprintf("Command configured: `%s`\n\n", *command)
-	summary += "**Note:** This is the initial stub. Proxy and cost tracking coming in v0.2.0+\n"
+	// Load pricing
+	prices, err := loadPricing(*pricingPath)
+	if err != nil {
+		return fmt.Errorf("load pricing: %w", err)
+	}
 
-	writeStepSummary(summary)
-	fmt.Println(summary)
+	// Create aggregator and writer
+	agg := ledger.NewAggregator()
+	writer, err := ledger.NewWriter("plarix-ledger.jsonl")
+	if err != nil {
+		return fmt.Errorf("create ledger writer: %w", err)
+	}
+	defer writer.Close()
+
+	// Start proxy
+	proxyConfig := proxy.Config{
+		Providers: strings.Split(*providers, ","),
+		OnEntry: func(e ledger.Entry) {
+			// Compute cost
+			if e.CostKnown && e.Model != "" {
+				result := prices.ComputeCost(e.Model, e.InputTokens, e.OutputTokens)
+				if result.Known {
+					e.CostUSD = result.CostUSD
+				} else {
+					e.CostKnown = false
+					e.UnknownReason = result.UnknownReason
+				}
+			}
+
+			// Record
+			agg.Add(e)
+			if err := writer.Write(e); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to write ledger entry: %v\n", err)
+			}
+		},
+	}
+
+	server := proxy.NewServer(proxyConfig)
+	port, err := server.Start()
+	if err != nil {
+		return fmt.Errorf("start proxy: %w", err)
+	}
+	defer server.Stop()
+
+	fmt.Printf("Plarix proxy started on port %d\n", port)
+
+	// Set environment variables for provider SDKs
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	envVars := map[string]string{
+		"OPENAI_BASE_URL":     baseURL + "/openai",
+		"OPENAI_API_BASE":     baseURL + "/openai",
+		"ANTHROPIC_BASE_URL":  baseURL + "/anthropic",
+		"OPENROUTER_BASE_URL": baseURL + "/openrouter",
+	}
+
+	// Run command
+	cmdErr := runUserCommand(*command, envVars)
+
+	// Get summary
+	summary := agg.Summary()
+
+	// Add staleness warning if applicable
+	if w := prices.StaleWarning(); w != "" {
+		summary.Warnings = append(summary.Warnings, w)
+	}
+
+	// Write summary file
+	if err := ledger.WriteSummary("plarix-summary.json", summary); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write summary: %v\n", err)
+	}
+
+	// Generate report
+	report := generateReport(summary, prices.AsOf)
+
+	// Output based on comment mode
+	if *commentMode == "summary" || *commentMode == "both" {
+		writeStepSummary(report)
+	}
+	fmt.Println(report)
+
+	// Check cost threshold
+	if *failOnCost > 0 && summary.TotalKnownCostUSD > *failOnCost {
+		return fmt.Errorf("cost threshold exceeded: $%.4f > $%.4f", summary.TotalKnownCostUSD, *failOnCost)
+	}
+
+	// Return command error if any
+	if cmdErr != nil {
+		return fmt.Errorf("command failed: %w", cmdErr)
+	}
+
+	return nil
 }
 
-// writeStepSummary writes content to GitHub Step Summary if available.
+func loadPricing(customPath string) (*pricing.Prices, error) {
+	path := customPath
+	if path == "" {
+		// Try to find bundled prices.json
+		exe, _ := os.Executable()
+		candidates := []string{
+			filepath.Join(filepath.Dir(exe), "prices", "prices.json"),
+			filepath.Join(filepath.Dir(exe), "..", "prices", "prices.json"),
+			"prices/prices.json",
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				path = c
+				break
+			}
+		}
+	}
+	if path == "" {
+		return nil, fmt.Errorf("pricing file not found")
+	}
+	return pricing.Load(path)
+}
+
+func runUserCommand(command string, envVars map[string]string) error {
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Copy current env and add overrides
+	cmd.Env = os.Environ()
+	for k, v := range envVars {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	return cmd.Run()
+}
+
+func generateReport(s ledger.Summary, pricesAsOf string) string {
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf("## 💰 Plarix Scan Cost Report\n\n"))
+	b.WriteString(fmt.Sprintf("**Total Known Cost:** $%.4f USD\n", s.TotalKnownCostUSD))
+	b.WriteString(fmt.Sprintf("**Calls Observed:** %d\n", s.TotalCalls))
+	b.WriteString(fmt.Sprintf("**Tokens:** %d in / %d out\n\n", s.TotalInputTokens, s.TotalOutputTokens))
+
+	if s.UnknownCostCalls > 0 {
+		b.WriteString(fmt.Sprintf("⚠️ **Unknown Cost Calls:** %d\n", s.UnknownCostCalls))
+		if len(s.UnknownReasons) > 0 {
+			for reason, count := range s.UnknownReasons {
+				b.WriteString(fmt.Sprintf("  - %s: %d\n", reason, count))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if s.TotalCalls == 0 {
+		b.WriteString("ℹ️ No real provider calls observed. Tests may be stubbed.\n\n")
+	}
+
+	// Model breakdown table (top 6)
+	if len(s.ModelBreakdown) > 0 {
+		b.WriteString("| Model | Calls | Tokens (in/out) | Known Cost |\n")
+		b.WriteString("|-------|-------|-----------------|------------|\n")
+
+		count := 0
+		for model, stats := range s.ModelBreakdown {
+			if count >= 6 {
+				break
+			}
+			b.WriteString(fmt.Sprintf("| %s | %d | %d / %d | $%.4f |\n",
+				model, stats.Calls, stats.InputTokens, stats.OutputTokens, stats.KnownCostUSD))
+			count++
+		}
+		b.WriteString("\n")
+	}
+
+	// Warnings
+	for _, w := range s.Warnings {
+		b.WriteString(w + "\n")
+	}
+
+	// Footer
+	b.WriteString(fmt.Sprintf("\n---\n*Plarix Scan v%s | Prices as of %s | %s*\n",
+		version, pricesAsOf, time.Now().UTC().Format("2006-01-02 15:04 UTC")))
+
+	return b.String()
+}
+
 func writeStepSummary(content string) {
 	summaryPath := os.Getenv("GITHUB_STEP_SUMMARY")
 	if summaryPath == "" {
 		return
 	}
 
-	// Append to summary file
 	f, err := os.OpenFile(summaryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not write step summary: %v\n", err)

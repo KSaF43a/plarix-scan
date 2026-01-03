@@ -1,0 +1,20 @@
+# Go binaries
+/plarix-scan
+*.exe
+
+# Build output
+/dist/
+
+# Ledger files (generated at runtime)
+plarix-ledger.jsonl
+plarix-summary.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

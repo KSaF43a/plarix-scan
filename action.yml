@@ -1,0 +1,58 @@
+name: 'Plarix Scan'
+description: 'Free CI cost recorder for LLM API usage — records tokens and costs from real provider responses'
+author: 'plarix-ai'
+
+branding:
+  icon: 'activity'
+  color: 'purple'
+
+inputs:
+  command:
+    description: 'Command to run (e.g., pytest -q, npm test)'
+    required: true
+  fail_on_cost_usd:
+    description: 'Exit non-zero if total known cost exceeds this threshold (USD)'
+    required: false
+  pricing_file:
+    description: 'Path to custom pricing JSON file (default: bundled prices.json)'
+    required: false
+  providers:
+    description: 'Comma-separated list of providers to intercept (default: openai,anthropic,openrouter)'
+    required: false
+    default: 'openai,anthropic,openrouter'
+  comment_mode:
+    description: 'Where to post results: pr, summary, or both (default: both)'
+    required: false
+    default: 'both'
+  enable_openai_stream_usage_injection:
+    description: 'Opt-in: inject stream_options to enable usage reporting on OpenAI streaming (default: false)'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+        cache-dependency-path: ${{ github.action_path }}/go.sum
+
+    - name: Build Plarix Scan
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: go build -o plarix-scan ./cmd/plarix-scan
+
+    - name: Run Plarix Scan
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_FAIL_ON_COST_USD: ${{ inputs.fail_on_cost_usd }}
+        INPUT_PRICING_FILE: ${{ inputs.pricing_file }}
+        INPUT_PROVIDERS: ${{ inputs.providers }}
+        INPUT_COMMENT_MODE: ${{ inputs.comment_mode }}
+        INPUT_ENABLE_OPENAI_STREAM_USAGE_INJECTION: ${{ inputs.enable_openai_stream_usage_injection }}
+      run: |
+        ${{ github.action_path }}/plarix-scan run --command "$INPUT_COMMAND"

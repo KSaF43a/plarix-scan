@@ -8,7 +8,10 @@ import (
 	"plarix-action/internal/ledger"
 )
 
-// usageStreamInterceptor wraps the response body to extract usage data from SSE streams.
+// usageStreamInterceptor wraps an io.ReadCloser (the upstream response body)
+// to transparently inspect Server-Sent Events (SSE) as they are read by the client.
+// It effectively "forks" the stream: one copy goes to the client (via Read),
+// and another is processed internally to extract token usage stats.
 type usageStreamInterceptor struct {
 	originalBody io.ReadCloser
 	provider     string
@@ -34,6 +37,10 @@ func newStreamInterceptor(body io.ReadCloser, provider, endpoint string, onCompl
 	}
 }
 
+// Read implements io.Reader. It reads from the upstream response and
+// immediately inspects the chunk for usage data before returning it.
+// This ensures that we capture usage even if the client disconnects later,
+// provided the data actually came through the wire.
 func (s *usageStreamInterceptor) Read(p []byte) (n int, err error) {
 	n, err = s.originalBody.Read(p)
 	if n > 0 {
@@ -55,8 +62,8 @@ func (s *usageStreamInterceptor) Close() error {
 }
 
 func (s *usageStreamInterceptor) scanChunk(chunk []byte) {
-	// We need to parse SSE lines: "data: {...}"
-	// Chunks might split lines. We use a buffer.
+	// TCP packets don't respect line boundaries. We might get half a JSON line.
+	// We buffer incoming bytes until we find a newline, then process the complete line.
 	s.lineBuffer.Write(chunk)
 
 	// Process complete lines

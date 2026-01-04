@@ -234,18 +234,13 @@ func (s *Server) handleResponse(provider, endpoint string, resp *http.Response) 
 	isStreaming := strings.Contains(contentType, "text/event-stream")
 
 	if isStreaming {
-		// For streaming: DON'T buffer the response, just pass through
-		// Record as an entry with unknown cost
-		entry := ledger.Entry{
-			Provider:      provider,
-			Endpoint:      endpoint,
-			Streaming:     true,
-			CostKnown:     false,
-			UnknownReason: "streaming response - usage not captured",
-		}
-		if s.config.OnEntry != nil {
-			s.config.OnEntry(entry)
-		}
+		// Wrap body to intercept usage
+		interceptor := newStreamInterceptor(resp.Body, provider, endpoint, func(e ledger.Entry) {
+			if s.config.OnEntry != nil {
+				s.config.OnEntry(e)
+			}
+		})
+		resp.Body = interceptor
 		return nil
 	}
 

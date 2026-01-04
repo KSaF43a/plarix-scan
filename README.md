@@ -1,25 +1,25 @@
 # Plarix Scan
 
-Free CI cost recorder for LLM API usage — records tokens and costs from real provider responses.
+**Free CI cost recorder for LLM API usage.**
+Records tokens and costs from *real* provider responses (no estimation).
 
-## What It Does
+## Use Cases
+- **CI/CD**: Block PRs that exceed cost allowance.
+- **Local Dev**: Measure cost of running your test suite.
+- **Production**: Monitor LLM sidecar traffic via Docker.
 
-Plarix Scan is a GitHub Action that:
+---
 
-1. Starts a local HTTP forward-proxy (no TLS MITM, no custom certs)
-2. Runs your test/build command
-3. Intercepts LLM API calls when SDKs support base-URL overrides to plain HTTP
-4. Records usage from real provider responses (not estimated)
-5. Posts a cost summary to your PR
+## Quick Start (GitHub Action)
 
-## Quick Start
+Add this to your `.github/workflows/cost.yml`:
 
 ```yaml
-name: LLM Cost Tracking
+name: LLM Cost Check
 on: [pull_request]
 
 permissions:
-  pull-requests: write
+  pull-requests: write # Required for PR comments
 
 jobs:
   scan:
@@ -29,67 +29,104 @@ jobs:
       
       - uses: plarix-ai/scan@v1
         with:
-          command: "pytest -q"
+          command: "pytest -v" # Your test command
+          fail_on_cost_usd: 1.0 # Optional: fail if > $1.00
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-## Inputs
+## How It Works in 3 Steps
+1. **Starts a Proxy** on `localhost`.
+2. **Injects Env Vars** (e.g. `OPENAI_BASE_URL`) so your SDK routes traffic to the proxy.
+3. **Records Usage** from the actual API response body before passing it back to your app.
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `command` | Yes | — | Command to run (e.g., `pytest -q`, `npm test`) |
-| `fail_on_cost_usd` | No | — | Exit non-zero if total cost exceeds threshold |
-| `pricing_file` | No | bundled | Path to custom pricing JSON |
-| `providers` | No | `openai,anthropic,openrouter` | Providers to intercept |
-| `comment_mode` | No | `both` | Where to post: `pr`, `summary`, or `both` |
-| `enable_openai_stream_usage_injection` | No | `false` | Opt-in for OpenAI streaming usage |
+### Supported Providers
+The proxy sets these environment variables:
 
-## Supported Providers (v1)
+| Provider | Env Var Injected | Notes |
+|----------|------------------|-------|
+| **OpenAI** | `OPENAI_BASE_URL` | Chat Completions + Responses |
+| **Anthropic** | `ANTHROPIC_BASE_URL` | Messages API |
+| **OpenRouter**| `OPENROUTER_BASE_URL` | OpenAI-compatible endpoint |
 
-- **OpenAI** (Chat Completions + Responses API)
-- **Anthropic** (Messages API)
-- **OpenRouter** (OpenAI-compatible)
+> **Requirement**: Your LLM SDK must respect these standard environment variables or allow configuring the `base_url`.
 
-## How It Works
+---
 
-The action sets base URL environment variables to route SDK calls through the local proxy:
+## Output Files
 
+Artifacts are written to the working directory:
+
+### `plarix-ledger.jsonl`
+One entry per API call.
+```json
+{"ts":"2026-01-04T12:00:00Z","provider":"openai","model":"gpt-4o","input_tokens":50,"output_tokens":120,"cost_usd":0.001325,"cost_known":true}
 ```
-OPENAI_BASE_URL=http://127.0.0.1:<port>/openai
-ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/anthropic
-OPENROUTER_BASE_URL=http://127.0.0.1:<port>/openrouter
+
+### `plarix-summary.json`
+Aggregated totals.
+```json
+{
+  "total_calls": 5,
+  "total_known_cost_usd": 0.045,
+  "model_breakdown": {
+    "gpt-4o": {"calls": 5, "known_cost_usd": 0.045}
+  }
+}
 ```
 
-**Requirements:**
-- Your SDK must support base URL overrides via environment variables
-- SDKs that require HTTPS or hardcode endpoints won't work
+---
 
-## Limitations
+## Usage Guide
 
-### Fork PRs
-Secrets are usually unavailable on PRs from forks. In this case, Plarix Scan will report: "No provider secrets available; no real usage observed."
+### 1. Local Development
+Run the binary to wrap your test command:
 
-### Stubbed Tests
-Many test suites stub LLM calls. If no real API calls are made, observed cost will be $0.
+```bash
+# Build (or download)
+go build -o plarix-scan ./cmd/plarix-scan
 
-### SDK Compatibility
-Not all SDKs support HTTP base URLs. If interception fails, the project is marked "Not interceptable".
+# Run
+./plarix-scan run --command "npm test"
+```
 
-## Output
+### 2. Production (Docker Sidecar)
+Run Plarix as a long-lived proxy sidecar.
 
-- **PR Comment** (idempotent, updated each run)
-- **GitHub Step Summary**
-- `plarix-ledger.jsonl` — one JSON line per API call
-- `plarix-summary.json` — aggregated totals
+**docker-compose.yaml:**
+```yaml
+services:
+  plarix:
+    image: plarix-scan:latest # (Build locally provided Dockerfile)
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./ledgers:/data
+    command: proxy --port 8080 --ledger /data/plarix-ledger.jsonl
 
-## Cost Calculation
+  app:
+    image: my-app
+    environment:
+      - OPENAI_BASE_URL=http://plarix:8080/openai
+      - ANTHROPIC_BASE_URL=http://plarix:8080/anthropic
+```
 
-Costs are computed **only** from provider-reported usage fields:
-- No token estimation or guessing
-- Unknown costs are reported explicitly
-- Pricing from bundled `prices.json` (with staleness warnings)
+### 3. CI Configuration
 
-## License
+**Inputs:**
+- `command` (Required): The command to execute.
+- `fail_on_cost_usd` (Optional): Exit code 1 if cost exceeded.
+- `pricing_file` (Optional): Path to custom `prices.json`.
+- `enable_openai_stream_usage_injection` (Optional, default `false`): Forces usage reporting for OpenAI streams.
 
-MIT
+---
+
+## Accuracy Guarantee
+
+Plarix Scan prioritizes **correctness over estimation**.
+- **Provider Reported**: We ONLY record costs if the provider returns usage fields (e.g., `usage: { prompt_tokens: ... }`).
+- **Real Streaming**: We intercept streaming bodies to parse usage chunks (e.g. OpenAI `stream_options`).
+- **Unknown Models**: If a model is not in our pricing table, we record usage but mark cost as **Unknown**. We do not guess.
+
+> **Note on Stubs**: If your tests use stubs/mocks (e.g. VCR cassettes), Plarix won't see any traffic, and cost will be $0. This is expected.

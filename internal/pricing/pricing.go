@@ -13,6 +13,8 @@ import (
 )
 
 // Prices holds the pricing table for all supported models.
+// It is intended to be loaded from a JSON file (prices.json).
+// AsOf indicates the date when this pricing snapshot was taken.
 type Prices struct {
 	AsOf   string                `json:"as_of"`
 	Models map[string]ModelPrice `json:"models"`
@@ -52,6 +54,9 @@ func Load(path string) (*Prices, error) {
 
 // ComputeCost calculates the cost for a model based on token counts.
 // Returns unknown if model is not in pricing table.
+//
+// Calculation: (InputTokens * InputPrice + OutputTokens * OutputPrice) / 1000
+// We use 1k token granularity internally, even if pricing is gathered per 1M.
 func (p *Prices) ComputeCost(model string, inputTokens, outputTokens int) CostResult {
 	mp, ok := p.Models[model]
 	if !ok {
@@ -82,7 +87,7 @@ func (p *Prices) IsStale(maxAge time.Duration) bool {
 // StaleWarning returns a warning message if prices are stale.
 func (p *Prices) StaleWarning() string {
 	if p.IsStale(60 * 24 * time.Hour) { // 60 days
-		return fmt.Sprintf("⚠️ Pricing table may be stale (as_of: %s)", p.AsOf)
+		return fmt.Sprintf("Pricing table may be stale (as_of: %s)", p.AsOf)
 	}
 	return ""
 }

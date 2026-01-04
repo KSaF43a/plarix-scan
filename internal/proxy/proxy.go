@@ -14,12 +14,15 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"plarix-action/internal/ledger"
+	"plarix-action/internal/providers/anthropic"
 	"plarix-action/internal/providers/openai"
+	"plarix-action/internal/providers/openrouter"
 )
 
 // Config holds proxy configuration.
@@ -60,6 +63,12 @@ func NewServer(config Config) *Server {
 // Start begins listening on a random available port.
 // Returns the port number.
 func (s *Server) Start() (int, error) {
+	return s.StartOn(0)
+}
+
+// StartOn begins listening on the specified port.
+// If port is 0, a random port is chosen.
+func (s *Server) StartOn(port int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -68,17 +77,28 @@ func (s *Server) Start() (int, error) {
 	}
 
 	var err error
-	s.listener, err = net.Listen("tcp", "127.0.0.1:0")
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	// For Docker (proxy mode), we might want to listen on all interfaces (0.0.0.0)
+	// But current default was 127.0.0.1.
+	// If port is specified (non-zero), assume we might want external access?
+	// The user request says "mounts a volume... exposes a port".
+	// If we bind 127.0.0.1 in Docker, it won't be accessible from host unless using host network.
+	// We should default to 0.0.0.0 if port != 0? Or just change default binding.
+	if port != 0 {
+		addr = fmt.Sprintf("0.0.0.0:%d", port)
+	}
+
+	s.listener, err = net.Listen("tcp", addr)
 	if err != nil {
 		return 0, fmt.Errorf("listen: %w", err)
 	}
 
-	port := s.listener.Addr().(*net.TCPAddr).Port
+	actualPort := s.listener.Addr().(*net.TCPAddr).Port
 	s.started = true
 
 	go s.httpServer.Serve(s.listener)
 
-	return port, nil
+	return actualPort, nil
 }
 
 // Stop shuts down the server.
@@ -127,6 +147,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	targetURL, _ := url.Parse(targetBase)
+
+	// Check for environment variable override (TEST_UPSTREAM_*)
+	// Format: PLARIX_UPSTREAM_OPENAI, PLARIX_UPSTREAM_ANTHROPIC
+	envParam := fmt.Sprintf("PLARIX_UPSTREAM_%s", strings.ToUpper(provider))
+	if override := strings.TrimSpace(os.Getenv(envParam)); override != "" {
+		if parsed, err := url.Parse(override); err == nil {
+			targetURL = parsed
+		}
+	}
 
 	// Optionally inject stream_options for OpenAI (opt-in only)
 	if s.config.StreamUsageInjection && provider == "openai" {
@@ -205,18 +234,13 @@ func (s *Server) handleResponse(provider, endpoint string, resp *http.Response) 
 	isStreaming := strings.Contains(contentType, "text/event-stream")
 
 	if isStreaming {
-		// For streaming: DON'T buffer the response, just pass through
-		// Record as an entry with unknown cost
-		entry := ledger.Entry{
-			Provider:      provider,
-			Endpoint:      endpoint,
-			Streaming:     true,
-			CostKnown:     false,
-			UnknownReason: "streaming response - usage not captured",
-		}
-		if s.config.OnEntry != nil {
-			s.config.OnEntry(entry)
-		}
+		// Wrap body to intercept usage
+		interceptor := newStreamInterceptor(resp.Body, provider, endpoint, func(e ledger.Entry) {
+			if s.config.OnEntry != nil {
+				s.config.OnEntry(e)
+			}
+		})
+		resp.Body = interceptor
 		return nil
 	}
 
@@ -257,13 +281,9 @@ func (s *Server) parseUsage(provider, endpoint string, body []byte) ledger.Entry
 	case "openai":
 		openai.ParseResponse(body, &entry)
 	case "anthropic":
-		// TODO: Milestone 6
-		entry.CostKnown = false
-		entry.UnknownReason = "anthropic parser not implemented"
+		anthropic.ParseResponse(body, &entry)
 	case "openrouter":
-		// TODO: Milestone 6 - OpenRouter uses OpenAI-compatible format
-		entry.CostKnown = false
-		entry.UnknownReason = "openrouter parser not implemented"
+		openrouter.ParseResponse(body, &entry)
 	default:
 		entry.CostKnown = false
 		entry.UnknownReason = "unsupported provider"

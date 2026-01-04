@@ -13,7 +13,10 @@ import (
 )
 
 // Entry represents a single LLM API call record.
-// Raw usage fields are preserved; cost is computed externally.
+//
+// Design note: RawUsage is preserved to allow debugging of new provider formats
+// without losing data. CostKnown is critical: it distinguishes "free tier" ($0.00)
+// from "unknown model" (which implies missing pricing data).
 type Entry struct {
 	Timestamp     string                 `json:"ts"`
 	Provider      string                 `json:"provider"`
@@ -57,7 +60,8 @@ type Writer struct {
 }
 
 // NewWriter creates a new ledger writer.
-// Returns error if file cannot be created.
+// It opens the file in append-only mode, creating it if necessary.
+// This ensures that we don't lose previous run data if the process restarts.
 func NewWriter(path string) (*Writer, error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

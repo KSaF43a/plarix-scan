@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"plarix-action/internal/action"
@@ -20,7 +22,7 @@ import (
 	"plarix-action/internal/proxy"
 )
 
-const version = "0.4.0"
+const version = "0.6.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -31,6 +33,11 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		if err := runCmd(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "proxy":
+		if err := runProxy(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -50,6 +57,7 @@ func printUsage() {
 
 Commands:
   run       Run a command with LLM API cost tracking
+  proxy     Start the proxy server in daemon mode
   version   Print version information
   help      Show this help message
 
@@ -59,7 +67,13 @@ Run Options:
   --fail-on-cost <float>   Exit non-zero if cost exceeds threshold (USD)
   --providers <csv>    Providers to intercept (default: openai,anthropic,openrouter)
   --comment <mode>     Comment mode: pr, summary, both (default: both)
-  --enable-openai-stream-usage-injection <bool>   Opt-in for OpenAI stream usage (default: false)`)
+  --enable-openai-stream-usage-injection <bool>   Opt-in for OpenAI stream usage (default: false)
+
+Proxy Options:
+  --port <int>         Port to listen on (default: 8080)
+  --pricing <path>     Path to custom pricing JSON
+  --ledger <path>      Path to ledger file (default: plarix-ledger.jsonl)
+  --providers <csv>    Providers to intercept (default: openai,anthropic,openrouter)`)
 }
 
 func runCmd(args []string) error {
@@ -194,6 +208,78 @@ func runCmd(args []string) error {
 	return nil
 }
 
+func runProxy(args []string) error {
+	fs := flag.NewFlagSet("proxy", flag.ExitOnError)
+
+	portFlag := fs.Int("port", 8080, "Port to listen on")
+	pricingPath := fs.String("pricing", "", "Path to custom pricing JSON")
+	ledgerPath := fs.String("ledger", "plarix-ledger.jsonl", "Path to ledger file")
+	providers := fs.String("providers", "openai,anthropic,openrouter", "Providers to intercept")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Load pricing
+	prices, err := loadPricing(*pricingPath)
+	if err != nil {
+		return fmt.Errorf("load pricing: %w", err)
+	}
+
+	// Create aggregator and writer
+	writer, err := ledger.NewWriter(*ledgerPath)
+	if err != nil {
+		return fmt.Errorf("create ledger writer: %w", err)
+	}
+	defer writer.Close()
+
+	// Start proxy
+	proxyConfig := proxy.Config{
+		Providers: strings.Split(*providers, ","),
+		OnEntry: func(e ledger.Entry) {
+			// Compute cost
+			if e.CostKnown && e.Model != "" {
+				result := prices.ComputeCost(e.Model, e.InputTokens, e.OutputTokens)
+				if result.Known {
+					e.CostUSD = result.CostUSD
+				} else {
+					e.CostKnown = false
+					e.UnknownReason = result.UnknownReason
+				}
+			}
+
+			// Record
+			// In proxy mode, we might just log to stdout as well
+			fmt.Printf("Recorded call: %s %s tokens=%d/%d cost=$%.4f\n",
+				e.Provider, e.Model, e.InputTokens, e.OutputTokens, e.CostUSD)
+
+			if err := writer.Write(e); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to write ledger entry: %v\n", err)
+			}
+		},
+	}
+
+	// Start proxy
+	server := proxy.NewServer(proxyConfig)
+	actualPort, err := server.StartOn(*portFlag)
+	if err != nil {
+		return fmt.Errorf("start proxy: %w", err)
+	}
+	defer server.Stop()
+
+	fmt.Printf("Plarix proxy running on port %d\n", actualPort)
+	fmt.Printf("Ledger: %s\n", *ledgerPath)
+	fmt.Println("Press Ctrl+C to stop...")
+
+	// Wait for signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	<-sigChan
+
+	fmt.Println("\nShutting down...")
+	return nil
+}
+
 func loadPricing(customPath string) (*pricing.Prices, error) {
 	path := customPath
 	if path == "" {
@@ -234,13 +320,13 @@ func runUserCommand(command string, envVars map[string]string) error {
 func generateReport(s ledger.Summary, pricesAsOf string) string {
 	var b strings.Builder
 
-	b.WriteString("## 💰 Plarix Scan Cost Report\n\n")
+	b.WriteString("## Plarix Scan Cost Report\n\n")
 	fmt.Fprintf(&b, "**Total Known Cost:** $%.4f USD\n", s.TotalKnownCostUSD)
 	fmt.Fprintf(&b, "**Calls Observed:** %d\n", s.TotalCalls)
 	fmt.Fprintf(&b, "**Tokens:** %d in / %d out\n\n", s.TotalInputTokens, s.TotalOutputTokens)
 
 	if s.UnknownCostCalls > 0 {
-		fmt.Fprintf(&b, "⚠️ **Unknown Cost Calls:** %d\n", s.UnknownCostCalls)
+		fmt.Fprintf(&b, "**Unknown Cost Calls:** %d\n", s.UnknownCostCalls)
 		if len(s.UnknownReasons) > 0 {
 			for reason, count := range s.UnknownReasons {
 				fmt.Fprintf(&b, "  - %s: %d\n", reason, count)
@@ -250,7 +336,7 @@ func generateReport(s ledger.Summary, pricesAsOf string) string {
 	}
 
 	if s.TotalCalls == 0 {
-		b.WriteString("ℹ️ No real provider calls observed. Tests may be stubbed.\n\n")
+		b.WriteString("No real provider calls observed. Tests may be stubbed.\n\n")
 	}
 
 	// Model breakdown table (top 6)

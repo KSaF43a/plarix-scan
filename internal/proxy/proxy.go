@@ -14,12 +14,15 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"plarix-action/internal/ledger"
+	"plarix-action/internal/providers/anthropic"
 	"plarix-action/internal/providers/openai"
+	"plarix-action/internal/providers/openrouter"
 )
 
 // Config holds proxy configuration.
@@ -127,6 +130,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	targetURL, _ := url.Parse(targetBase)
+
+	// Check for environment variable override (TEST_UPSTREAM_*)
+	// Format: PLARIX_UPSTREAM_OPENAI, PLARIX_UPSTREAM_ANTHROPIC
+	envParam := fmt.Sprintf("PLARIX_UPSTREAM_%s", strings.ToUpper(provider))
+	if override := strings.TrimSpace(os.Getenv(envParam)); override != "" {
+		if parsed, err := url.Parse(override); err == nil {
+			targetURL = parsed
+		}
+	}
 
 	// Optionally inject stream_options for OpenAI (opt-in only)
 	if s.config.StreamUsageInjection && provider == "openai" {
@@ -257,13 +269,9 @@ func (s *Server) parseUsage(provider, endpoint string, body []byte) ledger.Entry
 	case "openai":
 		openai.ParseResponse(body, &entry)
 	case "anthropic":
-		// TODO: Milestone 6
-		entry.CostKnown = false
-		entry.UnknownReason = "anthropic parser not implemented"
+		anthropic.ParseResponse(body, &entry)
 	case "openrouter":
-		// TODO: Milestone 6 - OpenRouter uses OpenAI-compatible format
-		entry.CostKnown = false
-		entry.UnknownReason = "openrouter parser not implemented"
+		openrouter.ParseResponse(body, &entry)
 	default:
 		entry.CostKnown = false
 		entry.UnknownReason = "unsupported provider"

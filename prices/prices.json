@@ -1,9 +1,13 @@
 {
-    "as_of": "2026-01-03",
+    "as_of": "2026-01-04",
     "models": {
         "gpt-4o": {
             "input_per_1k": 0.0025,
             "output_per_1k": 0.01
+        },
+        "gpt-4o-2024-05-13": {
+            "input_per_1k": 0.005,
+            "output_per_1k": 0.015
         },
         "gpt-4o-mini": {
             "input_per_1k": 0.00015,
@@ -68,6 +72,10 @@
         "anthropic/claude-3-5-sonnet": {
             "input_per_1k": 0.003,
             "output_per_1k": 0.015
+        },
+        "anthropic/claude-3-5-haiku": {
+            "input_per_1k": 0.001,
+            "output_per_1k": 0.005
         },
         "anthropic/claude-3-opus": {
             "input_per_1k": 0.015,

